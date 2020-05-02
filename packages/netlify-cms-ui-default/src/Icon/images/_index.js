@@ -13,6 +13,7 @@ import iconCodeBlock from './code-block.svg';
 import iconDragHandle from './drag-handle.svg';
 import iconEye from './eye.svg';
 import iconFolder from './folder.svg';
+import iconGitea from './gitea.svg';
 import iconGithub from './github.svg';
 import iconGitlab from './gitlab.svg';
 import iconGrid from './grid.svg';
@@ -62,6 +63,7 @@ const images = {
   'drag-handle': iconDragHandle,
   eye: iconEye,
   folder: iconFolder,
+  gitea: iconGitea,
   github: iconGithub,
   gitlab: iconGitlab,
   grid: iconGrid,
