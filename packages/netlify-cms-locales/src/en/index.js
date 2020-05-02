@@ -4,6 +4,7 @@ const en = {
     loggingIn: 'Logging in...',
     loginWithNetlifyIdentity: 'Login with Netlify Identity',
     loginWithBitbucket: 'Login with Bitbucket',
+    loginWithGitea: 'Login with Gitea',
     loginWithGitHub: 'Login with GitHub',
     loginWithGitLab: 'Login with GitLab',
     errors: {
