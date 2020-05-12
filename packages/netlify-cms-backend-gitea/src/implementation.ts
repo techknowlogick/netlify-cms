@@ -1,20 +1,14 @@
-import trimStart from 'lodash/trimStart';
 import semaphore, { Semaphore } from 'semaphore';
-import { trim } from 'lodash';
 import { stripIndent } from 'common-tags';
 import {
-  unsentRequest,
-  responseParser,
   Implementation,
   User,
   Credentials,
   Config,
   asyncLock,
   AsyncLock,
-  ApiRequest,
-  allEntriesByFolder,
   entriesByFolder,
-  Cursor
+  runWithLock
 } from 'netlify-cms-lib-util';
 import AuthenticationPage from './AuthenticationPage';
 import API, { API_NAME } from './API';
@@ -118,30 +112,76 @@ export default class Gitea implements Implementation {
     return Promise.resolve(this.token);
   }
 
-  async entriesByFolder(folder: string, extension: string, depth: number) {
-    let cursor: Cursor;
+  async getMedia() {
+    console.log("getMedia")
+    return this.api!.listFiles(this.mediaFolder).then(async files => {
+      return await Promise.all(
+        files.map(async ({ sha, download_url, path, size, name }) => {
+          return { id: sha, name, size, download_url, path };
+        }),
+      );
+    });
+  }
 
+  entriesByFolder(path: string, extension: string) {
+    console.log(`entriesByFolder: ${path} ${extension}`)
     const listFiles = () =>
-      this.api!.listFiles(folder, depth).then(({ entries, cursor: c }) => {
-        cursor = c.mergeMeta({ extension });
-        return entries.filter(e => filterByExtension(e, extension));
-      });
+      this.api!.listFiles(path, true)
 
-    const head = await this.api!.defaultBranchCommitSha();
     const readFile = (path: string, id: string | null | undefined) => {
-      return this.api!.readFile(path, id, { head }) as Promise<string>;
+      return this.api!.readFile(path, id) as Promise<string>;
     };
-
-    const files = await entriesByFolder(
+    console.log(listFiles)
+    const files = entriesByFolder(
       listFiles,
       readFile,
-      this.api!.readFileMetadata.bind(this.api),
-      API_NAME,
+      ()=>{},
+      API_NAME
     );
-
-    // eslint-disable-next-line @typescript-eslint/ban-ts-ignore
-    // @ts-ignore
-    files[CURSOR_COMPATIBILITY_SYMBOL] = cursor;
     return files;
   }
+
+  fetchFiles = (files: any) => {
+    const sem = semaphore(MAX_CONCURRENT_DOWNLOADS);
+    const promises: any[] = [];
+    files.forEach((file: any) => {
+      promises.push(
+        new Promise(resolve =>
+          sem.take(() =>
+            this.api!.readFile(file.path, file.sha)
+              .then(data => {
+                resolve({ file, data });
+                sem.leave();
+              })
+              .catch((err = true) => {
+                sem.leave();
+                console.error(`failed to load file from Gitea: ${file.path}`);
+                resolve({ error: err });
+              }),
+          ),
+        ),
+      );
+    });
+    return Promise.all(promises).then(loadedEntries =>
+      loadedEntries.filter(loadedEntry => !loadedEntry.error),
+    );
+  };
+
+  // Fetches a single entry.
+  getEntry(path: string) {
+    return this.api!.readFile(path).then(data => ({
+      file: { path, id: null },
+      data: data as string,
+    }));
+  }
+
+  async persistEntry(entry: Entry, mediaFiles: AssetProxy[], options: PersistOptions) {
+    // persistEntry is a transactional operation
+    return runWithLock(
+      this.lock,
+      () => this.api!.persistFiles(entry, mediaFiles, options),
+      'Failed to acquire persist entry lock',
+    );
+  }
+
 }

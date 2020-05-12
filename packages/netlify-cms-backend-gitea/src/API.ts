@@ -25,6 +25,7 @@ import {
   requestWithBackoff,
   readFileMetadata,
   FetchError,
+  loadedEntries
 } from 'netlify-cms-lib-util';
 import { Base64 } from 'js-base64';
 import { Map } from 'immutable';
@@ -40,38 +41,6 @@ export interface Config {
   squashMerges: boolean;
   initialWorkflowStatus: string;
 }
-
-export interface CommitAuthor {
-  name: string;
-  email: string;
-}
-
-type GiteaPullRequest = {
-  id: number;
-  number: number; // ID of PR
-  title: string;
-  body: string; // description
-  state: string;
-  merged_by: {
-    full_name: string;
-    login: string; // username
-    id: number;
-  };
-  merged_at: string;
-  created_at: string;
-  updated_at: string;
-  target_branch: string;
-  source_branch: string;
-  user: {
-    full_name: string;
-    login: string;
-    id: number;
-  };
-  labels: string[];
-  head: {
-    sha: string
-  }
-};
 
 export default class API {
   apiRoot: string;
@@ -141,53 +110,100 @@ export default class API {
   };
 
   branchCommitSha = async (branch: string) => {
+    console.log(`branchCommitSha: ${branch}`)
     const branchInfo = await this.requestJSON(`${this.repoURL}/branches/${branch}`);
     const branchSha = branchInfo.commit.id
     return branchSha;
   };
 
   defaultBranchCommitSha = () => {
+    console.log("defaultBranchCommitSha")
     return this.branchCommitSha(this.branch);
   };
 
-  async readFileMetadata(path: string, sha: string | null | undefined) {
-    // TODO: complete this function
-    const fetchFileMetadata = async () => {
-      try {
-        const values = await this.requestJSON({
-          url: `${this.repoURL}/contents/${path}`,
-          params: { ref: this.branch },
-        });
-        const commit = values[0];
-        return {
-          author: commit.author.user
-            ? commit.author.user.display_name || commit.author.user.nickname
-            : commit.author.raw,
-          updatedOn: commit.date,
-        };
-      } catch (e) {
-        return { author: '', updatedOn: '' };
-      }
+  listFiles = async (path: string, recursive = false) => {
+    console.log(`listFiles: ${path} ${recursive}`)
+    let listCall = {truncated:true, tree:[]},
+        files = [],
+        page = 1,
+        per_page = 400;
+    while (listCall.truncated == true ) {
+      listCall = await this.requestJSON({
+        url: `${this.repoURL}/git/trees/${await this.defaultBranchCommitSha()}`,
+        params: {
+          page,
+          per_page,
+          recursive: true
+        }
+      })
+      page = page + 1
+      files.push(...listCall.tree.filter(item=>{
+        return (item.type == "blob")
+      }).filter(item=>{
+        return item.path.startsWith(path)
+      }).filter(item=>{
+        if (recursive) {
+          // if recursive then allow all below specific subdir
+          return true
+        }
+        // if no recurse, then look only at file in dir
+        return (path.split("/").length) == (item.path.split("/")-1)
+      }).map(file=>({
+        type: file.type,
+        id: file.sha,
+        name: file.name,
+        path: file.path,
+        size: file.size
+      })));
+    }
+    return files
+  }; // Done
+
+  readFile = async (
+    path: string,
+    sha: string,
+    { parseText = true, branch = this.branch } = {},
+  ): Promise<string | Blob> => {
+    console.log(`readFile: ${path} ${sha}`)
+    const fetchContent = async () => {
+      const content = await this.request({
+        url: `${this.repoURL}/contents/${path}`,
+        params: { ref: branch },
+      }).then<Blob | string>(this.responseToJSON)
+      .then((data)=>{
+        if(parseText) {
+          return this.fromBase64(data.content)
+        }
+        return b64toBlob(data.content)
+      });
+      return content;
     };
-    const fileMetadata = await readFileMetadata(sha, fetchFileMetadata, localForage);
-    return fileMetadata;
-  }
-  listFiles = async (path: string, depth = 1, pagelen = 200) => {
-    const node = await this.branchCommitSha(this.branch);
-    const result = await this.requestJSON({
-      url: `${this.repoURL}/git/trees/${node}`,
-      params: {
-        // eslint-disable-next-line @typescript-eslint/camelcase
-        page: depth,
-        per_page: pagelen,
-        recursive: true
-      },
-    });
-
-    // TODO: Filter path
-
-    //const { entries, cursor } = this.getEntriesAndCursor(result);
-
-    return { entries: result.tree };
+    const content = await readFile(sha, fetchContent, localForage, parseText);
+    return content;
   };
+
+  toBase64 = (str: string) => Promise.resolve(Base64.encode(str));
+  fromBase64 = (str: string) => Base64.decode(str);
+}
+
+
+// source: https://stackoverflow.com/questions/16245767/creating-a-blob-from-a-base64-string-in-javascript
+const b64toBlob = (b64Data, contentType = '', sliceSize = 512) => {
+  const byteCharacters = atob(b64Data);
+  const byteArrays = [];
+
+  for (let offset = 0; offset < byteCharacters.length; offset += sliceSize) {
+    const slice = byteCharacters.slice(offset, offset + sliceSize);
+
+    const byteNumbers = new Array(slice.length);
+    for (let i = 0; i < slice.length; i++) {
+      byteNumbers[i] = slice.charCodeAt(i);
+    }
+
+    const byteArray = new Uint8Array(byteNumbers);
+    byteArrays.push(byteArray);
+  }
+
+  const blob = new Blob(byteArrays, { type: contentType });
+  return blob;
 }
