@@ -1,37 +1,32 @@
 import {
   localForage,
-  parseLinkHeader,
   unsentRequest,
-  then,
   APIError,
-  Cursor,
   ApiRequest,
   Entry,
   AssetProxy,
   PersistOptions,
   readFile,
-  CMS_BRANCH_PREFIX,
-  generateContentKey,
-  isCMSLabel,
-  EditorialWorkflowError,
-  labelToStatus,
-  statusToLabel,
-  DEFAULT_PR_BODY,
-  MERGE_COMMIT_MESSAGE,
   responseParser,
-  PreviewState,
-  parseContentKey,
-  branchFromContentKey,
   requestWithBackoff,
-  readFileMetadata,
-  FetchError,
-  loadedEntries
 } from 'netlify-cms-lib-util';
 import { Base64 } from 'js-base64';
-import { Map } from 'immutable';
 import { flow, partial, result, trimStart } from 'lodash';
 
 export const API_NAME = 'Gitea';
+
+enum CommitAction {
+  CREATE = 'create',
+  DELETE = 'delete',
+  MOVE = 'move',
+  UPDATE = 'update',
+}
+
+type CommitItem = {
+  base64Content?: string;
+  path: string;
+  action: CommitAction;
+};
 
 export interface Config {
   apiRoot?: string;
@@ -180,10 +175,110 @@ export default class API {
     };
     const content = await readFile(sha, fetchContent, localForage, parseText);
     return content;
-  };
+  }; // done
 
   toBase64 = (str: string) => Promise.resolve(Base64.encode(str));
   fromBase64 = (str: string) => Base64.decode(str);
+
+  async persistFiles(entry: Entry | null, mediaFiles: AssetProxy[], options: PersistOptions) {
+    console.log([entry, mediaFiles, options])
+    const files = entry ? [entry, ...mediaFiles] : mediaFiles;
+    if (options.useWorkflow) {
+      // TOOD: handle editorial workflow
+    }
+    const items = await this.getCommitItems(files, this.branch);
+    return this.uploadAndCommit(items, {
+      commitMessage: options.commitMessage,
+    }); // Done
+  }
+
+  async isFileExists(path: string, branch: string) {
+    const fileExists = await this.requestJSON({
+      url: `${this.repoURL}/contents/${path}`,
+      params: { ref: branch },
+    })
+      .then(() => true)
+      .catch(error => {
+        if (error instanceof APIError && error.status === 404) {
+          return false;
+        }
+        throw error;
+      });
+
+    return fileExists;
+  } // Done
+
+  async getFileSha(path: string, branch: string) {
+    const fileSha = await this.requestJSON({
+      url: `${this.repoURL}/contents/${path}`,
+      params: { ref: branch },
+    })
+    .then((data) => {
+      return data.sha
+    }).catch(error => {
+        if (error instanceof APIError && error.status === 404) {
+          return "";
+        }
+        throw error;
+      });
+
+    return fileSha;
+  } // Done
+
+  async getCommitItems(files: (Entry | AssetProxy)[], branch: string) {
+    const items = await Promise.all(
+      files.map(async file => {
+        const [base64Content, fileSha] = await Promise.all([
+          result(file, 'toBase64', partial(this.toBase64, (file as Entry).raw)),
+          this.getFileSha(file.path, branch),
+        ]);
+        return {
+          action: (fileSha !== "") ? CommitAction.UPDATE : CommitAction.CREATE,
+          base64Content,
+          path: file.path,
+          sha: fileSha,
+        };
+      }),
+    );
+    return items as CommitItem[];
+  } // Done
+
+  uploadAndCommit(
+    items: CommitItem[],
+    { commitMessage = '', branch = this.branch, newBranch = false },
+  ) {
+    items.forEach(item => {
+      // loop through each item and commit
+      if(item.action == CommitAction.UPDATE) {
+        // PUT
+        console.log("TODO: update file", item)
+        this.requestJSON({
+          url: `${this.repoURL}/contents/${item.path}`,
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify({
+            message: commitMessage,
+            branch: branch,
+            content: item.base64Content,
+            sha: item.sha
+          }),
+        });
+      } else {
+        // POST
+        console.log("creating a file:", item)
+        this.requestJSON({
+          url: `${this.repoURL}/contents/${item.path}`,
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=utf-8' },
+          body: JSON.stringify({
+              message: commitMessage,
+              branch:branch,
+              content: item.base64Content,
+            }),
+        });
+      }
+    })
+  }
 }
 
 
